@@ -30,7 +30,8 @@ speffz-trainer-pwa/
 ├── public/
 │   └── icon.svg             # App icon
 ├── src/
-│   ├── main.jsx             # React app, training logic, analytics and preferences
+│   ├── main.jsx             # Color trainer, blindfold workflow, analytics and preferences
+│   ├── cubeTrainer.js       # Scramble simulator, sticker mapping and cycle tracing
 │   └── styles.css           # Responsive UI and mobile layout
 ├── index.html               # HTML entry point and metadata
 ├── package.json             # Scripts and dependencies
@@ -62,3 +63,25 @@ const FACES = [
 ```
 
 Repeated letter pairs are intentional and preserved. Training history and preferences stay in the current browser profile; they do not sync across devices.
+
+
+## Blindfold memorization and cycle analyzer
+
+Use **Blindfold Lab** in the top navigation to open the additional workspace.
+
+- Enter a standard 3×3 face-turn scramble (for example `R U R' U' F2`) or generate a random 20-move scramble.
+- Choose separate edge and corner buffer pieces before analyzing.
+- The app applies the scramble to a local sticker-state model, maps destination stickers to their home stickers, and traces physical-piece cycles. Letter sequences are derived from the selected Speffz mapping; they are not randomly generated.
+- When the buffer piece is part of an unsolved cycle, that cycle is shown first. If the buffer piece is solved, the remaining cycles use ascending smallest-letter order by default.
+- Drag cycles to change their order. If a buffer cycle exists, it remains first. Change the start sticker to another sticker on the same physical piece to retrace the cycle.
+- Study the sequences, click **I'm ready — hide solution**, and enter edge and corner answers. Inputs automatically uppercase letters and insert a space after every two letters.
+- Results show memorization time, recall/entry time, pair-level comparison, and exact-sequence correctness.
+- All data stays in the browser; no account or backend is required.
+
+Supported scramble notation is limited to outer-face turns `U D L R F B`, with optional `2` or `'` suffixes. Slice moves (`M`, `E`, `S`), wide turns (`Rw`), and whole-cube rotations (`x`, `y`, `z`) are not supported. The cycle analyzer uses the project's existing repeated face-letter configuration and is intended as a practice aid; compare it with your preferred blindfold-solving convention before relying on it for competition solves.
+
+## Latest corrections
+
+- A buffer cubie is treated as occupying its correct position when the stickers mapped into its slot belong to that same physical cubie, regardless of whether it is flipped/twisted. In that case no buffer cycle is emitted, and neither of the buffer cubie's sticker letters appears in the memo sequence.
+- The same buffer-position rule applies independently to edge and corner tracing.
+- The scramble preview uses a standard unfolded cube net: U above L-F-R-B, with D below F.

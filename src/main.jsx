@@ -14,6 +14,21 @@ import {
   ChartNoAxesCombined,
 } from "lucide-react";
 import "./styles.css";
+import {
+  KIND_STICKERS,
+  generateScramble,
+  parseScramble,
+  getStickerMapping,
+  getCycles,
+  pieceLetters,
+  pieceName,
+  rotateCycle,
+  formatPairs,
+  normalizeAnswer,
+  autoPairInput,
+  getScrambledFacelets,
+  getBufferStatus,
+} from "./cubeTrainer.js";
 const FACES = [
   { id: "U", name: "Up", color: "#ffffff", letters: "AABBCCDD" },
   { id: "L", name: "Left", color: "#ff7700", letters: "EEFFGGHH" },
@@ -89,6 +104,414 @@ function ColorPiece({ target, showFaceNames }) {
     </div>
   );
 }
+
+function BlindfoldWorkspace({ onHome }) {
+  const [scramble, setScramble] = useState("");
+  const [edgeBuffer, setEdgeBuffer] = useState(() => {
+    try { return JSON.parse(localStorage.getItem("speffz-lab-blindfold-preferences-v1") || "{}").edgeBuffer || "A"; }
+    catch { return "A"; }
+  });
+  const [cornerBuffer, setCornerBuffer] = useState(() => {
+    try { return JSON.parse(localStorage.getItem("speffz-lab-blindfold-preferences-v1") || "{}").cornerBuffer || "A"; }
+    catch { return "A"; }
+  });
+  const [analysis, setAnalysis] = useState(null);
+  const [error, setError] = useState("");
+  const [phase, setPhase] = useState("idle"); // idle | memorizing | recall | scored
+  const [memoStarted, setMemoStarted] = useState(0);
+  const [memoNow, setMemoNow] = useState(0);
+  const [memorizationMs, setMemorizationMs] = useState(0);
+  const [recallStarted, setRecallStarted] = useState(0);
+  const [edgeAnswer, setEdgeAnswer] = useState("");
+  const [cornerAnswer, setCornerAnswer] = useState("");
+  const [result, setResult] = useState(null);
+  const [dragging, setDragging] = useState(null);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem("speffz-lab-blindfold-preferences-v1", JSON.stringify({ edgeBuffer, cornerBuffer }));
+    } catch { /* Preferences remain usable if storage is unavailable. */ }
+  }, [edgeBuffer, cornerBuffer]);
+
+  useEffect(() => {
+    if (phase !== "memorizing" && phase !== "recall") return;
+    const id = setInterval(() => setMemoNow(performance.now()), 50);
+    return () => clearInterval(id);
+  }, [phase]);
+
+  const elapsed = phase === "memorizing"
+    ? Math.max(0, memoNow - memoStarted)
+    : phase === "recall"
+      ? Math.max(0, memoNow - recallStarted)
+      : 0;
+  const fmtTime = (ms) => `${(Math.max(0, ms) / 1000).toFixed(2)}s`;
+  const currentCycles = (kind) => analysis?.[kind]?.cycles ?? [];
+  const sequence = (kind) => formatPairs(currentCycles(kind));
+  const hasBufferCycle = (kind) => currentCycles(kind).some((c) => c.isBufferCycle);
+  const bufferStatus = (kind) => {
+    if (!analysis) return null;
+    const letter = kind === "edges" ? edgeBuffer : cornerBuffer;
+    return getBufferStatus(analysis[kind].mapping, kind, letter);
+  };
+  const isHidden = phase === "recall" || phase === "scored";
+
+  function build(text) {
+    try {
+      const tokens = parseScramble(text);
+      if (!tokens.length) throw new Error("Enter a scramble or generate a random one first.");
+      const edgeMapping = getStickerMapping(tokens, "edges");
+      const cornerMapping = getStickerMapping(tokens, "corners");
+      const next = {
+        tokens,
+        scramble: tokens.join(" "),
+        facelets: getScrambledFacelets(tokens),
+        edges: { mapping: edgeMapping, cycles: getCycles(edgeMapping, "edges", edgeBuffer) },
+        corners: { mapping: cornerMapping, cycles: getCycles(cornerMapping, "corners", cornerBuffer) },
+      };
+      setAnalysis(next);
+      setScramble(next.scramble);
+      setError("");
+      setPhase("memorizing");
+      setMemoStarted(performance.now());
+      setMemoNow(performance.now());
+      setMemorizationMs(0);
+      setRecallStarted(0);
+      setEdgeAnswer("");
+      setCornerAnswer("");
+      setResult(null);
+    } catch (e) {
+      setError(e?.message || "Could not analyze this scramble.");
+    }
+  }
+
+  function skipScramble() {
+    const generated = generateScramble(20);
+    setScramble(generated);
+    build(generated);
+  }
+
+  const scrambleFacelets = useMemo(() => {
+    try {
+      return getScrambledFacelets(parseScramble(scramble));
+    } catch {
+      return null;
+    }
+  }, [scramble]);
+
+  function updateCycles(kind, updater) {
+    setAnalysis((old) => {
+      if (!old) return old;
+      return { ...old, [kind]: { ...old[kind], cycles: updater(old[kind].cycles) } };
+    });
+  }
+
+  function reorderCycles(kind, fromId, toId) {
+    if (!fromId || !toId || fromId === toId) return;
+    updateCycles(kind, (oldCycles) => {
+      const bufferCycle = oldCycles.find((c) => c.isBufferCycle);
+      const fromIndex = oldCycles.findIndex((c) => c.id === fromId);
+      let toIndex = oldCycles.findIndex((c) => c.id === toId);
+      if (fromIndex < 0 || toIndex < 0) return oldCycles;
+      if (bufferCycle && oldCycles[fromIndex].isBufferCycle) return oldCycles;
+      if (bufferCycle) toIndex = Math.max(1, toIndex);
+      const next = [...oldCycles];
+      const [item] = next.splice(fromIndex, 1);
+      next.splice(toIndex, 0, item);
+      return next.map((c, i) => ({ ...c, index: i }));
+    });
+  }
+
+  function resetOrder(kind) {
+    if (!analysis) return;
+    const buffer = kind === "edges" ? edgeBuffer : cornerBuffer;
+    updateCycles(kind, () => getCycles(analysis[kind].mapping, kind, buffer));
+  }
+
+  function changeStart(kind, cycleId, letter) {
+    updateCycles(kind, (oldCycles) => oldCycles.map((cycle) => {
+      if (cycle.id !== cycleId) return cycle;
+      const next = rotateCycle(cycle, letter, analysis[kind].mapping, kind);
+      return { ...next, id: cycle.id };
+    }));
+  }
+
+  function readyForRecall() {
+    setMemorizationMs(Math.max(0, performance.now() - memoStarted));
+    setRecallStarted(performance.now());
+    setMemoNow(performance.now());
+    setPhase("recall");
+  }
+
+  function compare(kind, expected, answer) {
+    const exp = normalizeAnswer(expected);
+    const got = normalizeAnswer(answer);
+    const totalPairs = Math.ceil(exp.length / 2);
+    const expPairs = exp.match(/.{1,2}/g) || [];
+    const gotPairs = got.match(/.{1,2}/g) || [];
+    const pairResults = Array.from({ length: Math.max(expPairs.length, gotPairs.length) }, (_, i) => ({
+      expected: expPairs[i] || "—",
+      entered: gotPairs[i] || "—",
+      correct: !!expPairs[i] && expPairs[i] === gotPairs[i],
+    }));
+    return {
+      kind,
+      expected: exp,
+      entered: got,
+      exact: exp === got,
+      correctPairs: pairResults.filter((p) => p.correct).length,
+      totalPairs,
+      pairResults,
+    };
+  }
+
+  function submitRecall() {
+    if (!analysis) return;
+    const edges = compare("edges", sequence("edges"), edgeAnswer);
+    const corners = compare("corners", sequence("corners"), cornerAnswer);
+    setResult({
+      edges,
+      corners,
+      recallMs: Math.max(0, performance.now() - recallStarted),
+      memorizationMs,
+    });
+    setPhase("scored");
+  }
+
+  const bufferOptions = (kind) => KIND_STICKERS[kind].map((sticker) => ({
+    // Every sticker is a separate buffer orientation. For example, UF and FU
+    // are the same physical edge but different buffer stickers.
+    letter: sticker.letter,
+    piece: pieceName(sticker.letter, kind),
+    stickers: pieceLetters(sticker.letter, kind),
+  }));
+  const edgeOptions = bufferOptions("edges");
+  const cornerOptions = bufferOptions("corners");
+
+  return (
+    <main className="main blindfold-main">
+      <div className="train-header blindfold-topline">
+        <button className="back-link" onClick={onHome}>← Back to color trainer</button>
+        <span className="type-chip">BLINDFOLD / CYCLE LAB</span>
+      </div>
+      <section className="setup-card bld-setup">
+        <div className="section-heading">
+          <div><span className="step">02</span><h2>Blindfold memorization & cycle analyzer</h2></div>
+          <span className="muted">REAL SCRAMBLE → TRACE</span>
+        </div>
+        <p className="bld-intro">
+          Enter a standard 3×3 face-turn scramble or generate one. The trainer simulates the turns and derives edge/corner sticker traces using your existing Speffz letters.
+        </p>
+        <div className="bld-scramble-layout">
+          <div className="bld-scramble-entry">
+            <label className="field-label" htmlFor="bld-scramble">SCRAMBLE</label>
+            <textarea
+              id="bld-scramble"
+              className="scramble-input"
+              rows={4}
+              value={scramble}
+              onChange={(e) => setScramble(e.target.value)}
+              placeholder="Example: R U R' U' F2 D L2 B' U2"
+              disabled={phase === "memorizing" || phase === "recall"}
+            />
+            <div className="bld-toolbar">
+              <button className="secondary-btn" onClick={() => {
+                const generated = generateScramble(20);
+                setScramble(generated);
+                build(generated);
+              }}>Generate random scramble</button>
+              <button className="primary-btn" onClick={() => build(scramble)}>Analyze & memorize</button>
+              <button className="secondary-btn bld-skip-btn" onClick={skipScramble}>Skip scramble ↗</button>
+              {phase === "memorizing" && <span className="bld-live-time">Memorizing {fmtTime(elapsed)}</span>}
+            </div>
+          </div>
+          <aside className="bld-cube-preview" aria-label="Live six-face cube diagram for the entered scramble">
+            <div className="bld-cube-preview-head"><strong>SCRAMBLE PREVIEW</strong><span>6 faces</span></div>
+            {scrambleFacelets ? (
+              <div className="bld-six-faces">
+                {scrambleFacelets.map((face) => (
+                  <div className={`bld-mini-face bld-face-${face.id}`} key={face.id}>
+                    <span>{face.id}</span>
+                    <div className="bld-mini-grid">
+                      {face.stickers.map((sticker, i) => (
+                        <i key={i} style={{ backgroundColor: sticker?.color || "#222" }} title={`${face.id} sticker ${i + 1}`} />
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : <p className="bld-preview-error">Invalid move notation — correct the scramble to preview the cube.</p>}
+            <p>Updates as you edit the scramble. Colors show the resulting cube state.</p>
+          </aside>
+        </div>
+        <div className="bld-buffers">
+          <label>
+            <span className="field-label">EDGE BUFFER PIECE</span>
+            <select value={edgeBuffer} onChange={(e) => setEdgeBuffer(e.target.value)} disabled={phase === "memorizing" || phase === "recall"}>
+              {edgeOptions.map((option) => <option key={option.letter} value={option.letter}>{option.piece} — start {option.letter} ({option.stickers.join("/")})</option>)}
+            </select>
+          </label>
+          <label>
+            <span className="field-label">CORNER BUFFER PIECE</span>
+            <select value={cornerBuffer} onChange={(e) => setCornerBuffer(e.target.value)} disabled={phase === "memorizing" || phase === "recall"}>
+              {cornerOptions.map((option) => <option key={option.letter} value={option.letter}>{option.piece} — start {option.letter} ({option.stickers.join("/")})</option>)}
+            </select>
+          </label>
+        </div>
+        {analysis && (
+          <div className="bld-buffer-statuses">
+            {[["edges", "Edge"], ["corners", "Corner"]].map(([kind, label]) => {
+              const status = bufferStatus(kind);
+              const text = status === "solved"
+                ? "Buffer solved — tracing begins at the next unsolved cycle."
+                : status === "flipped" || status === "twisted"
+                  ? `Buffer ${status} in its slot — its orientation target must be memoized.`
+                  : status === "displaced"
+                    ? "Buffer displaced — its cycle is traced first."
+                    : "";
+              return <p className={`bld-buffer-status ${status || ""}`} key={kind}><strong>{label} buffer:</strong> {text}</p>;
+            })}
+          </div>
+        )}
+        {error && <div className="bld-error" role="alert">{error}</div>}
+        <p className="bld-note">
+          Each buffer option represents a specific sticker orientation on a physical piece. For example, the two orientations of one edge are separate options. Use the selectors on each cycle to start tracing from any piece in that cycle and choose any sticker on that piece.
+          <br />Supported notation: <code>U D L R F B</code>, optional <code>'</code> or <code>2</code>. Wide turns, slices, rotations, and non-3×3 notation are not supported in this version.
+        </p>
+      </section>
+
+      {analysis && (
+        <>
+          <div className="bld-summary-strip">
+            <div><span>SCRAMBLE MOVES</span><strong>{analysis.tokens.length}</strong></div>
+            <div><span>EDGE CYCLES</span><strong>{analysis.edges.cycles.length}</strong></div>
+            <div><span>CORNER CYCLES</span><strong>{analysis.corners.cycles.length}</strong></div>
+            <div><span>PHASE</span><strong>{phase === "memorizing" ? "Memorize" : phase === "recall" ? "Recall" : phase === "scored" ? "Results" : "Ready"}</strong></div>
+          </div>
+
+          {phase === "memorizing" && (
+            <section className="bld-memory-banner">
+              <div><span className="tiny-label">MEMORIZATION TIMER</span><strong>{fmtTime(elapsed)}</strong><p>Study the sequences and cycle order. Reorder cycles or change a cycle's starting sticker before you hide the solution.</p></div>
+              <button className="primary-btn" onClick={readyForRecall}>I'm ready — hide solution <ChevronRight size={17}/></button>
+            </section>
+          )}
+
+          {["edges", "corners"].map((kind) => (
+            <section className="table-card bld-cycle-panel" key={kind}>
+              <div className="table-heading">
+                <div>
+                  <span className="tiny-label">{kind === "edges" ? "24 EDGE STICKERS" : "24 CORNER STICKERS"}</span>
+                  <h2>{kind === "edges" ? "Edge cycles" : "Corner cycles"}</h2>
+                  <p className="bld-panel-subtitle">
+                    {hasBufferCycle(kind) ? "The buffer cycle is first by default; the other cycles can be rearranged." : "The buffer is solved, so all detected cycles can be rearranged."}
+                  </p>
+                </div>
+                <button className="text-btn" onClick={() => resetOrder(kind)} disabled={isHidden}>Reset default order</button>
+              </div>
+              {!currentCycles(kind).length ? (
+                <div className="empty-inline">No unsolved {kind} pieces were detected for this scramble.</div>
+              ) : (
+                <div className="bld-cycles">
+                  {currentCycles(kind).map((cycle, index) => (
+                    <div
+                      className={`bld-cycle-card ${cycle.isBufferCycle ? "buffer-cycle" : ""}`}
+                      key={cycle.id}
+                      draggable={!isHidden && (!hasBufferCycle(kind) || !cycle.isBufferCycle)}
+                      onDragStart={() => setDragging({ kind, id: cycle.id })}
+                      onDragOver={(e) => { if (!isHidden) e.preventDefault(); }}
+                      onDrop={(e) => {
+                        e.preventDefault();
+                        if (dragging?.kind === kind) reorderCycles(kind, dragging.id, cycle.id);
+                        setDragging(null);
+                      }}
+                      onDragEnd={() => setDragging(null)}
+                    >
+                      <div className="cycle-card-head">
+                        <span className="drag-handle" aria-hidden="true">{(!hasBufferCycle(kind) || !cycle.isBufferCycle) && !isHidden ? "⠿" : "🔒"}</span>
+                        <div><strong>Cycle {index + 1}</strong><small>{isHidden ? "Cycle details hidden" : cycle.isBufferCycle ? "Buffer cycle" : `Default key: ${cycle.minLetter}`}</small></div>
+                        {!isHidden && (
+                          <div className="cycle-piece-selectors" aria-label="Choose a starting sticker for any piece in this cycle">
+                            {[cycle.startSticker, ...cycle.letters].reduce((items, letter) => {
+                              const name = pieceName(letter, kind);
+                              if (!name || items.some((item) => item.name === name)) return items;
+                              items.push({ name, letter });
+                              return items;
+                            }, []).map(({ name, letter }) => (
+                              <label className="cycle-start-select" key={name}>
+                                <span>{name}</span>
+                                <select
+                                  aria-label={`Starting sticker for piece ${name}`}
+                                  value={letter}
+                                  onChange={(e) => changeStart(kind, cycle.id, e.target.value)}
+                                >
+                                  {pieceLetters(letter, kind).map((optionLetter) => (
+                                    <option key={optionLetter} value={optionLetter}>{optionLetter}</option>
+                                  ))}
+                                </select>
+                              </label>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                      <div className="cycle-letters">{isHidden ? "•• •• ••" : formatPairs([cycle]) || "—"}</div>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <div className="bld-combined">
+                <span>COMBINED LETTER PAIRS</span>
+                <strong>{isHidden ? "Hidden during recall" : sequence(kind) || "—"}</strong>
+                {!isHidden && <button className="text-btn" onClick={() => navigator.clipboard?.writeText(sequence(kind))}>Copy sequence</button>}
+              </div>
+            </section>
+          ))}
+
+          {phase === "recall" && (
+            <section className="setup-card bld-recall-card">
+              <div className="section-heading"><div><span className="step">03</span><h2>Recall the letter pairs</h2></div><span className="bld-live-time">{fmtTime(elapsed)}</span></div>
+              <p className="bld-intro">Type each sequence from memory. A space is inserted after every two letters. Recall time is recorded when you submit.</p>
+              <label className="field-label" htmlFor="edge-recall">YOUR EDGE PAIRS</label>
+              <textarea id="edge-recall" className="scramble-input answer-pairs" rows={2} value={edgeAnswer} onChange={(e) => setEdgeAnswer(autoPairInput(e.target.value))} placeholder="e.g. AI GT MQ" autoCapitalize="characters" />
+              <label className="field-label" htmlFor="corner-recall">YOUR CORNER PAIRS</label>
+              <textarea id="corner-recall" className="scramble-input answer-pairs" rows={2} value={cornerAnswer} onChange={(e) => setCornerAnswer(autoPairInput(e.target.value))} placeholder="e.g. CR FU NP" autoCapitalize="characters" />
+              <button className="primary-btn" onClick={submitRecall}>Check answers <CheckCircle2 size={17}/></button>
+            </section>
+          )}
+
+          {phase === "scored" && result && (
+            <section className="table-card bld-results">
+              <div className="table-heading"><div><span className="tiny-label">SESSION COMPLETE</span><h2>Memorization results</h2></div><span className="bld-live-time">Recall {fmtTime(result.recallMs)}</span></div>
+              <div className="result-cards bld-result-cards">
+                <div className="result-card"><span>MEMORIZATION</span><strong>{fmtTime(result.memorizationMs)}</strong><div className="result-foot">Time before recall</div></div>
+                <div className="result-card"><span>RECALL / ENTRY</span><strong>{fmtTime(result.recallMs)}</strong><div className="result-foot">Time to submit</div></div>
+                <div className="result-card"><span>EDGE PAIRS</span><strong>{result.edges.correctPairs}/{result.edges.totalPairs}</strong><div className="result-foot">{result.edges.exact ? "Exact sequence" : "Sequence differs"}</div></div>
+                <div className="result-card"><span>CORNER PAIRS</span><strong>{result.corners.correctPairs}/{result.corners.totalPairs}</strong><div className="result-foot">{result.corners.exact ? "Exact sequence" : "Sequence differs"}</div></div>
+              </div>
+              {[
+                ["edges", result.edges],
+                ["corners", result.corners],
+              ].map(([kind, r]) => (
+                <div className="bld-answer-review" key={kind}>
+                  <h3>{kind === "edges" ? "Edge answer" : "Corner answer"} — {r.exact ? "Correct" : "Review pairs"}</h3>
+                  <p><b>Expected:</b> {formatPairs(currentCycles(kind)) || "—"}</p>
+                  <p><b>Entered:</b> {autoPairInput(kind === "edges" ? edgeAnswer : cornerAnswer) || "—"}</p>
+                  <div className="pair-review">
+                    {r.pairResults.map((pair, i) => <span key={i} className={pair.correct ? "pair-good" : "pair-bad"} title={pair.correct ? "Correct pair" : `Expected ${pair.expected}; entered ${pair.entered}`}>{pair.entered}</span>)}
+                  </div>
+                </div>
+              ))}
+              <div className="result-actions">
+                <button className="primary-btn" onClick={() => build(scramble)}><RotateCcw size={17}/> Practice same scramble</button>
+                <button className="secondary-btn" onClick={() => { const generated=generateScramble(20); setScramble(generated); build(generated); }}>New random scramble</button>
+              </div>
+            </section>
+          )}
+        </>
+      )}
+      <p className="bld-disclaimer">This is a local training aid. Verify the tracing convention against your preferred Speffz / blindfold method before relying on it for a timed solve.</p>
+    </main>
+  );
+}
+
 function App() {
   const [page, setPage] = useState("home"),
     [type, setType] = useState("edges"),
@@ -412,6 +835,9 @@ function App() {
           <span className="offline-pill">
             <i /> OFFLINE READY
           </span>
+          <button className="bld-nav-btn" onClick={() => setPage("blindfold")}>
+            Blindfold Lab
+          </button>
           <button
             className="icon-btn"
             title="Session history"
@@ -421,6 +847,7 @@ function App() {
           </button>
         </div>
       </header>
+      {page === "blindfold" && <BlindfoldWorkspace onHome={() => setPage("home")} />}
       {page === "home" && (
         <main className="main">
           <section className="hero">
